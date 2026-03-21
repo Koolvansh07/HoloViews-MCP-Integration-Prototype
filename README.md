@@ -1,3 +1,4 @@
+https://github.com/user-attachments/assets/d415ce18-7068-4da3-b5de-1a6ca02f0708
 ## Setup
 
 ```bash
@@ -76,6 +77,10 @@ returned by both tools.
 - `create_plot`
 - `update_plot`
 - `list_plot_types`
+
+
+
+
 
 ## Inherited panel-live-server Tools
 
