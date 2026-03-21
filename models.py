@@ -7,7 +7,7 @@ from typing import Any
 SUPPORTED_PLOT_TYPES = ["scatter", "line", "bar"]
 
 
-@dataclass
+@dataclass(frozen=True)
 class PlotRequest:
     data: list[dict[str, Any]]
     plot_type: str
@@ -38,7 +38,10 @@ class PlotRequest:
 
 
 def validate_plot_request(
-    data: list[dict[str, Any]], plot_type: str, x: str, y: str
+    data: list[dict[str, Any]],
+    plot_type: str,
+    x: str,
+    y: str,
 ) -> PlotRequest:
     request = PlotRequest(data=data, plot_type=plot_type, x=x, y=y)
     request.validate()

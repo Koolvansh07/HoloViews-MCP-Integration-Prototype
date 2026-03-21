@@ -1,58 +1,66 @@
 from __future__ import annotations
 
-from io import StringIO
-from typing import Any
+import json
+from textwrap import dedent
 
-import holoviews as hv
-import pandas as pd
-import panel as pn
-from bokeh.resources import INLINE
-
-from models import validate_plot_request
+from models import PlotRequest
 
 
-pn.extension()
-hv.extension("bokeh")
+def _plot_expression(request: PlotRequest) -> str:
+    x = json.dumps(request.x)
+    y = json.dumps(request.y)
 
+    if request.plot_type == "scatter":
+        return dedent(
+            f"""
+            hv.Scatter(df, kdims={x}, vdims={y}).opts(
+                size=8,
+                tools=["hover"],
+                height=400,
+                responsive=True,
+            )
+            """
+        ).strip()
 
-def _make_plot(df: pd.DataFrame, plot_type: str, x: str, y: str) -> hv.Element:
-    if plot_type == "scatter":
-        return hv.Scatter(df, kdims=x, vdims=y).opts(
-            size=8,
+    if request.plot_type == "line":
+        return dedent(
+            f"""
+            hv.Curve(df, kdims={x}, vdims={y}).opts(
+                tools=["hover"],
+                line_width=2,
+                height=400,
+                responsive=True,
+            )
+            """
+        ).strip()
+
+    return dedent(
+        f"""
+        hv.Bars(df, kdims={x}, vdims={y}).opts(
             tools=["hover"],
             height=400,
             responsive=True,
         )
+        """
+    ).strip()
 
-    if plot_type == "line":
-        return hv.Curve(df, kdims=x, vdims=y).opts(
-            tools=["hover"],
-            line_width=2,
-            height=400,
-            responsive=True,
-        )
 
-    return hv.Bars(df, kdims=x, vdims=y).opts(
-        tools=["hover"],
-        height=400,
-        responsive=True,
+def build_visualization_code(request: PlotRequest) -> str:
+    data_json = json.dumps(request.data, ensure_ascii=True)
+    plot_expression = _plot_expression(request)
+
+    return "\n".join(
+        [
+            "import json",
+            "",
+            "import holoviews as hv",
+            "import pandas as pd",
+            "",
+            'hv.extension("bokeh")',
+            "",
+            f"data = json.loads({json.dumps(data_json)})",
+            "df = pd.DataFrame(data)",
+            "",
+            plot_expression,
+        ]
     )
-
-
-def render_plot(
-    data: list[dict[str, Any]], plot_type: str, x: str, y: str
-) -> str:
-    request = validate_plot_request(data=data, plot_type=plot_type, x=x, y=y)
-    df = pd.DataFrame(request.data)
-
-    plot = _make_plot(df=df, plot_type=request.plot_type, x=request.x, y=request.y)
-
-    layout = pn.Column(
-        f"## Simple {request.plot_type.title()} Plot",
-        pn.pane.HoloViews(plot, sizing_mode="stretch_width"),
-        sizing_mode="stretch_width",
-    )
-
-    html_buffer = StringIO()
-    layout.save(html_buffer, resources=INLINE, embed=True, title="MCP HoloViz Plot")
-    return html_buffer.getvalue()
