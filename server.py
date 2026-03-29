@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import atexit
 import json
+from pathlib import Path
+import subprocess
+import sys
 import threading
+from textwrap import dedent
 from typing import Any
 from typing import Literal
 
@@ -12,6 +16,10 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.apps import AppConfig
 from fastmcp.server.apps import ResourceCSP
 
+from panel_live_server.client import DisplayClient
+from panel_live_server.config import get_config
+import panel_live_server.manager as panel_manager_module
+from panel_live_server.manager import PanelServerManager
 import panel_live_server.server as panel_server
 
 from models import SUPPORTED_PLOT_TYPES
@@ -24,12 +32,17 @@ mcp = FastMCP(
     instructions=(
         "Use the structured plotting tools first when the user wants a simple "
         "scatter, line, or bar chart from tabular JSON data. These tools return "
-        "an MCP App payload for inline rendering when the client supports it."
+        "an MCP App payload for inline rendering when the client supports it. "
+        "Use show or interactive_sine_wave when the user wants a richer "
+        "interactive Panel app with sliders or widget controls rendered inline "
+        "in chat."
     ),
 )
 
 _RENDERER_LOCK = threading.Lock()
-_WARMUP_STARTED = False
+
+
+_PANEL_STARTUP_TIMEOUT_SECONDS = 90
 
 
 def _tool_name(plot_type: str, plot_id: str, version: int) -> str:
@@ -45,7 +58,7 @@ def _ensure_renderer_ready() -> None:
         if panel_server._client and panel_server._client.is_healthy():
             return
 
-        manager, client = panel_server._start_panel_server()
+        manager, client = _start_panel_server()
         if not manager or not client:
             raise RuntimeError("Failed to start panel-live-server renderer.")
 
@@ -53,26 +66,132 @@ def _ensure_renderer_ready() -> None:
         panel_server._client = client
 
 
-def _warm_renderer_background() -> None:
-    global _WARMUP_STARTED
+def _patch_panel_startup_timeout() -> None:
+    original_wait_for_health = PanelServerManager._wait_for_health
 
-    if _WARMUP_STARTED:
-        return
+    def _wait_for_health_with_longer_timeout(
+        self: PanelServerManager,
+        timeout: int = _PANEL_STARTUP_TIMEOUT_SECONDS,
+        interval: float = 1.0,
+    ) -> bool:
+        return original_wait_for_health(self, timeout=timeout, interval=interval)
 
-    _WARMUP_STARTED = True
+    PanelServerManager._wait_for_health = _wait_for_health_with_longer_timeout
 
-    def _runner() -> None:
+
+class _StdIOSafePanelServerManager(PanelServerManager):
+    """Detach renderer stdin so the child does not inherit the MCP stdio pipe."""
+
+    def start(self) -> bool:
+        if self.process and self.process.poll() is None:
+            panel_manager_module.logger.info("Panel server is already running")
+            return True
+
+        if self._is_port_in_use():
+            if self._try_recover_stale_server():
+                return True
+            if self._is_port_in_use():
+                panel_manager_module.logger.error(
+                    f"Port {self.port} is still in use, cannot start Panel server"
+                )
+                return False
+
         try:
-            _ensure_renderer_ready()
-        except Exception:
-            # Best-effort warmup only. Tool calls will retry on demand.
-            return
+            app_path = Path(panel_manager_module.__file__).parent / "app.py"
+            env = self._build_subprocess_env()
 
-    threading.Thread(target=_runner, daemon=True, name="panel-renderer-warmup").start()
+            panel_manager_module.logger.info(
+                f"Using database at: {env['PANEL_LIVE_SERVER_DB_PATH']}"
+            )
+            panel_manager_module.logger.info(
+                f"Starting Panel server on {self.host}:{self.port}"
+            )
+
+            self.process = subprocess.Popen(
+                [sys.executable, str(app_path)],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+
+            if self._wait_for_health():
+                panel_manager_module.logger.info("Panel server started successfully")
+                self.restart_count = 0
+                return True
+
+            panel_manager_module.logger.error(
+                "Panel server failed to start (health check timed out)"
+            )
+            self.stop()
+            return False
+        except Exception as e:
+            panel_manager_module.logger.exception(f"Error starting Panel server: {e}")
+            return False
+
+
+def _start_panel_server() -> tuple[PanelServerManager | None, DisplayClient | None]:
+    config = get_config()
+    manager = _StdIOSafePanelServerManager(
+        db_path=config.db_path,
+        port=config.port,
+        host=config.host,
+        max_restarts=config.max_restarts,
+    )
+
+    if not manager.start():
+        panel_manager_module.logger.error("Failed to start Panel server")
+        return None, None
+
+    client = DisplayClient(base_url=manager.get_base_url())
+    return manager, client
+
+
+def _render_snippet_payload(
+    *,
+    code: str,
+    name: str,
+    description: str,
+    method: Literal["jupyter", "panel"],
+    zoom: int,
+) -> str:
+    if not panel_server._client:
+        raise ToolError("Panel Live Server client is not available.")
+
+    response = panel_server._client.create_snippet(
+        code=code,
+        name=name,
+        description=description,
+        method=method,
+    )
+    url = panel_server._externalize_url(response.get("url", ""))
+
+    payload: dict[str, str | int] = {
+        "tool": "show",
+        "name": name,
+        "description": description,
+        "method": method,
+        "zoom": zoom,
+        "url": url,
+        "code": code,
+    }
+
+    if error_message := response.get("error_message"):
+        raise ToolError(
+            "Visualization created but failed at runtime:\n"
+            f"{error_message}\n"
+            "Fix the code and try again."
+        )
+
+    payload["status"] = "success"
+    payload["message"] = "Visualization created successfully."
+    return json.dumps(payload)
 
 
 atexit.register(panel_server._cleanup)
-_warm_renderer_background()
+_patch_panel_startup_timeout()
 
 
 @mcp.resource(
@@ -164,7 +283,10 @@ def list_plot_types() -> list[str]:
     return SUPPORTED_PLOT_TYPES
 
 
-@mcp.tool(name="list_packages")
+@mcp.tool(
+    name="list_packages",
+    description="List packages available inside the panel-live-server runtime.",
+)
 async def list_packages(
     category: str = "core",
     query: str = "",
@@ -179,7 +301,10 @@ async def list_packages(
     )
 
 
-@mcp.tool(name="validate")
+@mcp.tool(
+    name="validate",
+    description="Validate Panel or HoloViews code before rendering it inline.",
+)
 async def validate(
     code: str,
     method: Literal["jupyter", "panel"] = "jupyter",
@@ -188,24 +313,120 @@ async def validate(
     return await panel_server.validate(code=code, method=method, ctx=ctx)
 
 
-@mcp.tool(name="show", app=AppConfig(resource_uri=panel_server.SHOW_RESOURCE_URI))
+@mcp.tool(
+    name="interactive_sine_wave",
+    description="Render an inline interactive HoloViews sine-wave app with sliders for amplitude, frequency, and phase.",
+    app=AppConfig(resource_uri=panel_server.SHOW_RESOURCE_URI),
+)
+async def interactive_sine_wave(
+    amplitude: float = 1.0,
+    frequency: float = 1.0,
+    phase: float = 0.0,
+    points: int = 400,
+) -> str:
+    code = dedent(
+        f"""
+        import numpy as np
+        import holoviews as hv
+        import panel as pn
+
+        hv.extension("bokeh")
+        pn.extension()
+
+        x = np.linspace(0, 4 * np.pi, {points})
+
+
+        def make_curve(amplitude, frequency, phase):
+            y = amplitude * np.sin(frequency * x + phase)
+            return hv.Curve((x, y), "x", "y").opts(
+                height=420,
+                responsive=True,
+                line_width=3,
+                tools=["hover"],
+                title="Interactive Sine Wave",
+            )
+
+
+        amplitude_slider = pn.widgets.FloatSlider(
+            name="Amplitude", start=0.1, end=5.0, step=0.1, value={amplitude}
+        )
+        frequency_slider = pn.widgets.FloatSlider(
+            name="Frequency", start=0.1, end=5.0, step=0.1, value={frequency}
+        )
+        phase_slider = pn.widgets.FloatSlider(
+            name="Phase", start=0.0, end=6.28, step=0.1, value={phase}
+        )
+
+        curve = pn.bind(
+            make_curve,
+            amplitude=amplitude_slider,
+            frequency=frequency_slider,
+            phase=phase_slider,
+        )
+
+        pn.Column(
+            "## Interactive Sine Wave",
+            "Adjust the sliders to update the HoloViews curve inline.",
+            amplitude_slider,
+            frequency_slider,
+            phase_slider,
+            curve,
+        )
+        """
+    ).strip()
+    return await show(
+        code=code,
+        name="Interactive Sine Wave",
+        description="HoloViews curve rendered inline with Panel sliders.",
+        method="jupyter",
+        zoom=100,
+        quick=True,
+        ctx=None,
+    )
+
+
+@mcp.tool(
+    name="show",
+    description="Render arbitrary Panel or HoloViews code inline through panel-live-server.",
+    app=AppConfig(resource_uri=panel_server.SHOW_RESOURCE_URI),
+)
 async def show(
     code: str,
     name: str = "",
     description: str = "",
     method: Literal["jupyter", "panel"] = "jupyter",
     zoom: int = 100,
-    quick: bool = False,
+    quick: bool = True,
     ctx: Context | None = None,
 ) -> str:
     _ensure_renderer_ready()
+    valid_zooms = [25, 50, 75, 100]
+    zoom = min(valid_zooms, key=lambda candidate: abs(candidate - zoom))
+
+    if quick:
+        validation = panel_server._run_validation(code, method)
+        if not validation.get("valid", False):
+            panel_server._raise_validation_error(validation)
+        return _render_snippet_payload(
+            code=code,
+            name=name,
+            description=description,
+            method=method,
+            zoom=zoom,
+        )
+
+    validation = await panel_server.validate(code=code, method=method, ctx=ctx)
+    if not validation.get("valid", False):
+        layer = validation.get("layer", "validation")
+        message = validation.get("message", "Visualization validation failed.")
+        raise ToolError(f"[{layer}] {message}")
     return await panel_server.show(
         code=code,
         name=name,
         description=description,
         method=method,
         zoom=zoom,
-        quick=quick,
+        quick=False,
         ctx=ctx,
     )
 

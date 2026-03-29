@@ -11,6 +11,7 @@ env/
 
 output.html
 prototype.md
+.panel-live-server/
 
 .vscode/
 .idea/

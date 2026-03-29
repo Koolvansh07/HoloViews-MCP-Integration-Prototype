@@ -39,6 +39,12 @@ update_example = {
     "plot_type": "line",
 }
 
+sine_wave_example = {
+    "amplitude": 1.5,
+    "frequency": 1.2,
+    "phase": 0.4,
+}
+
 
 async def main() -> None:
     async with Client(mcp) as client:
@@ -88,6 +94,21 @@ async def main() -> None:
         print(json.dumps(update_payload, indent=2))
         print(f"Updated fallback browser URL: {update_payload['url']}")
         webbrowser.open(update_payload["url"])
+
+        print()
+        print("interactive_sine_wave example input:")
+        print(json.dumps(sine_wave_example, indent=2))
+        print()
+
+        sine_result = await client.call_tool(
+            "interactive_sine_wave",
+            sine_wave_example,
+        )
+        sine_payload = json.loads(sine_result.content[0].text)
+        print("interactive_sine_wave returned:")
+        print(json.dumps(sine_payload, indent=2))
+        print(f"Interactive app fallback browser URL: {sine_payload['url']}")
+        webbrowser.open(sine_payload["url"])
 
         print()
         print("Keep this terminal open while viewing the browser demo.")

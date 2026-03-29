@@ -19,7 +19,8 @@ python server.py
 
 This server now builds on `panel-live-server`, so compatible MCP clients can render
 `create_plot` and `update_plot` inline in the chat pane instead of only returning a URL.
-For reliability, the structured tools use a lightweight HoloViews rendering path for single plots.
+For reliability, the structured tools use a lightweight HoloViews rendering path for single plots,
+while interactive widget apps can be rendered through `show` or `interactive_sine_wave`.
 
 ## Run The Local Demo
 
@@ -28,7 +29,8 @@ python test_local.py
 ```
 
 This simulates MCP tool calls locally, prints the returned payload, and opens the fallback
-browser URLs. Inline rendering only happens inside a compatible MCP client UI.
+browser URLs. It also includes an interactive HoloViews sine-wave app with sliders. Inline
+rendering only happens inside a compatible MCP client UI.
 Keep the terminal open while viewing the demo. The `/feed` endpoint is not the visualization;
 open the returned `/view?id=...` URL instead.
 
@@ -71,6 +73,22 @@ Example `update_plot` input:
 
 When you run `python test_local.py`, it uses this exact scenario and prints the MCP payloads
 returned by both tools.
+
+## Interactive Chat Example
+
+When the user wants a plot rendered inline in chat with widget controls, call:
+
+- `interactive_sine_wave`
+
+This tool returns a Panel app backed by HoloViews and includes sliders for:
+
+- `amplitude`
+- `frequency`
+- `phase`
+
+For custom widget-driven apps, use:
+
+- `show`
 
 ## Structured Plot Tools
 
