@@ -1,6 +1,10 @@
 https://github.com/user-attachments/assets/d415ce18-7068-4da3-b5de-1a6ca02f0708
 ## Setup
 
+
+https://github.com/user-attachments/assets/7a537aa3-0900-459d-86ae-2329efdf16c7
+
+
 ```bash
 pip install -r requirements.txt
 ```
